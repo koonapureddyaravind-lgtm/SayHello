@@ -1,0 +1,231 @@
+# ============================================================================
+# comGpt — Coolify deployment (self-contained, single file)
+# ----------------------------------------------------------------------------
+# Coolify's own Traefik proxy terminates TLS and generates the routing labels,
+# so there is NO Caddy service here. Point a Coolify "Docker Compose" deployment
+# at this file, set the environment variables in Coolify's UI, then assign domains:
+#
+#   frontend     -> https://app.yourdomain.com:3000   (the browser UI)
+#   backend-api  -> https://api.yourdomain.com:8080   (provider webhooks only)
+#
+# The browser only talks to the frontend; its same-origin /api/backend/* proxy
+# reaches backend-api over the internal Docker network (BACKEND_URL below).
+# Set FRONTEND_URL to the public frontend origin (https://app.yourdomain.com).
+#
+# Hardening: no host ports published (published ports bypass Coolify's proxy),
+# core secrets REQUIRED (compose fails fast if unset), demo data OFF, no Mailpit,
+# CPU/memory limits and log rotation on every service. Data lives in named volumes.
+#
+# Required env: POSTGRES_PASSWORD, RABBITMQ_PASSWORD, OMNIFLOW_JWT_SECRET,
+#   OMNIFLOW_ENCRYPTION_KEY, FRONTEND_URL.
+# Delivery env (set when ready): SMTP_* (email), WHATSAPP_* (WhatsApp).
+#   SMS needs no env — add a gateway per workspace under Integrations.
+# See .env.coolify.example. NEVER commit real secrets.
+# ============================================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-omniflow}
+      POSTGRES_USER: ${POSTGRES_USER:-omniflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in Coolify}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-omniflow} -d ${POSTGRES_DB:-omniflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+
+  redis:
+    image: valkey/valkey:8-alpine
+    restart: unless-stopped
+    command: ["valkey-server", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-omniflow}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in Coolify}
+    volumes:
+      - rabbitdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+  backend-api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/backend.Dockerfile
+    image: omniflow-backend:local
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-omniflow}
+      DATABASE_USERNAME: ${POSTGRES_USER:-omniflow}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in Coolify}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-omniflow}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in Coolify}
+      OMNIFLOW_JWT_SECRET: ${OMNIFLOW_JWT_SECRET:?set OMNIFLOW_JWT_SECRET in Coolify}
+      OMNIFLOW_ENCRYPTION_KEY: ${OMNIFLOW_ENCRYPTION_KEY:?set OMNIFLOW_ENCRYPTION_KEY in Coolify}
+      OMNIFLOW_DEMO_DATA: "false"
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_FROM: ${SMTP_FROM:-}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_API_VERSION: ${WHATSAPP_API_VERSION:-v21.0}
+      FRONTEND_URL: ${FRONTEND_URL:?set FRONTEND_URL to your public https origin in Coolify}
+      IMPORT_STAGING_DIR: /app/data/imports
+      IMPORT_MAX_CHUNK_MB: ${IMPORT_MAX_CHUNK_MB:-64}
+      IMPORT_MAX_FILE_BYTES: ${IMPORT_MAX_FILE_BYTES:-0}
+    volumes:
+      - importdata:/app/data/imports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1536M
+
+  backend-worker:
+    image: omniflow-backend:local
+    restart: unless-stopped
+    command: ["/app/worker.jar"]
+    environment:
+      SPRING_PROFILES_ACTIVE: docker,worker
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-omniflow}
+      DATABASE_USERNAME: ${POSTGRES_USER:-omniflow}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in Coolify}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-omniflow}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in Coolify}
+      OMNIFLOW_JWT_SECRET: ${OMNIFLOW_JWT_SECRET:?set OMNIFLOW_JWT_SECRET in Coolify}
+      OMNIFLOW_ENCRYPTION_KEY: ${OMNIFLOW_ENCRYPTION_KEY:?set OMNIFLOW_ENCRYPTION_KEY in Coolify}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-true}
+      SMTP_FROM: ${SMTP_FROM:-}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_API_VERSION: ${WHATSAPP_API_VERSION:-v21.0}
+      OMNIFLOW_RATE_EMAIL_PER_MIN: ${OMNIFLOW_RATE_EMAIL_PER_MIN:-600}
+      OMNIFLOW_RATE_WHATSAPP_PER_MIN: ${OMNIFLOW_RATE_WHATSAPP_PER_MIN:-300}
+      OMNIFLOW_RATE_SMS_PER_MIN: ${OMNIFLOW_RATE_SMS_PER_MIN:-300}
+      IMPORT_STAGING_DIR: /app/data/imports
+      IMPORT_MAX_CHUNK_MB: ${IMPORT_MAX_CHUNK_MB:-64}
+      IMPORT_MAX_FILE_BYTES: ${IMPORT_MAX_FILE_BYTES:-0}
+      IMPORT_LOCK_SECONDS: ${IMPORT_LOCK_SECONDS:-3600}
+      IMPORT_MAX_ATTEMPTS: ${IMPORT_MAX_ATTEMPTS:-5}
+    volumes:
+      - importdata:/app/data/imports
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      backend-api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1536M
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../infrastructure/docker/frontend.Dockerfile
+      args:
+        NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-comGpt}
+    image: omniflow-frontend:local
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend-api:8080
+      NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-comGpt}
+    depends_on:
+      backend-api:
+        condition: service_started
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+volumes:
+  pgdata:
+  rabbitdata:
+  importdata:

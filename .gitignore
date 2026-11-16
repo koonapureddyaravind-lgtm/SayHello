@@ -1,0 +1,67 @@
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+!.env.production.example
+!.env.coolify.example
+*.pem
+*.key
+secrets/
+
+# ---- Postal: real config/keys never committed (templates stay tracked) ----
+infrastructure/postal/postal.yml
+infrastructure/postal/signing.key
+infrastructure/postal/config/
+
+# ---- Java / Maven ----
+backend/**/target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+hs_err_pid*
+replay_pid*
+.mvn/timing.properties
+
+# ---- Node / Next.js ----
+node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+frontend/.turbo/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.next/
+*.tsbuildinfo
+next-env.d.ts
+
+# ---- Test / coverage ----
+coverage/
+.nyc_output/
+*.lcov
+backend/**/target/surefire-reports/
+
+# ---- IDE / OS ----
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Docker / runtime ----
+infrastructure/data/
+infrastructure/monitoring/grafana-data/
+*.log
+logs/
+tmp/
+
+# ---- Database backups (never commit dumps) ----
+backups/
+*.dump
+*.sql.gz

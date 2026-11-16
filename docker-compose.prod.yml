@@ -1,0 +1,128 @@
+# Production override — use together with the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# Or run scripts/prod-up.sh (prod-up.ps1 on Windows).
+#
+# Hardening applied here:
+#   * Caddy is the only public entrypoint (auto Let's Encrypt HTTPS on 80/443).
+#   * All database/queue/app ports are internal-only (no host publishing).
+#   * Core secrets are REQUIRED (compose fails fast if unset).
+#   * Demo data is opt-in via OMNIFLOW_DEMO_DATA in .env (default off).
+#   * Mailpit is dev-only; production email uses the shared SMTP_* relay from .env.
+#   * CPU/memory limits and log rotation on every service.
+# Requires a filled-in .env (see .env.production.example).
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: omniflow-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to your public hostname in .env}
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    volumes:
+      - ./infrastructure/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      backend-api:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 256M
+
+  postgres:
+    ports: !reset null
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+
+  redis:
+    ports: !reset null
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+  rabbitmq:
+    ports: !reset null
+    environment:
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+  mailpit:
+    profiles: ["dev"]
+    ports: !reset null
+
+  backend-api:
+    ports: !reset null
+    environment:
+      OMNIFLOW_JWT_SECRET: ${OMNIFLOW_JWT_SECRET:?set OMNIFLOW_JWT_SECRET in .env}
+      OMNIFLOW_ENCRYPTION_KEY: ${OMNIFLOW_ENCRYPTION_KEY:?set OMNIFLOW_ENCRYPTION_KEY in .env}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
+      OMNIFLOW_DEMO_DATA: ${OMNIFLOW_DEMO_DATA:-false}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:?set WHATSAPP_APP_SECRET in .env}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:?set WHATSAPP_VERIFY_TOKEN in .env}
+      FRONTEND_URL: ${FRONTEND_URL:?set FRONTEND_URL to your public https origin in .env}
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1536M
+
+  backend-worker:
+    ports: !reset null
+    environment:
+      OMNIFLOW_JWT_SECRET: ${OMNIFLOW_JWT_SECRET:?set OMNIFLOW_JWT_SECRET in .env}
+      OMNIFLOW_ENCRYPTION_KEY: ${OMNIFLOW_ENCRYPTION_KEY:?set OMNIFLOW_ENCRYPTION_KEY in .env}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .env}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:?set WHATSAPP_APP_SECRET in .env}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:?set WHATSAPP_VERIFY_TOKEN in .env}
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1536M
+
+  frontend:
+    ports: !reset null
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+
+volumes:
+  caddy_data:
+  caddy_config:

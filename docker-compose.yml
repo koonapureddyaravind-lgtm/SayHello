@@ -1,0 +1,232 @@
+name: omniflow
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: omniflow-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-omniflow}
+      POSTGRES_USER: ${POSTGRES_USER:-omniflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-omniflow_dev_password}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-omniflow} -d ${POSTGRES_DB:-omniflow}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: valkey/valkey:8-alpine
+    container_name: omniflow-redis
+    restart: unless-stopped
+    command: ["valkey-server", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    container_name: omniflow-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USERNAME:-omniflow}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-omniflow_dev_password}
+    ports:
+      - "${RABBITMQ_MANAGEMENT_PORT:-15672}:15672"
+      - "5672:5672"
+    volumes:
+      - rabbitdata:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+
+  mailpit:
+    image: axllent/mailpit:latest
+    container_name: omniflow-mailpit
+    restart: unless-stopped
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+
+  backend-api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/backend.Dockerfile
+    image: omniflow-backend:local
+    container_name: omniflow-api
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-omniflow}
+      DATABASE_USERNAME: ${POSTGRES_USER:-omniflow}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-omniflow_dev_password}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-omniflow}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-omniflow_dev_password}
+      OMNIFLOW_JWT_SECRET: ${OMNIFLOW_JWT_SECRET:-dev-only-change-me-omniflow-jwt-secret-at-least-32-bytes}
+      OMNIFLOW_ENCRYPTION_KEY: ${OMNIFLOW_ENCRYPTION_KEY:-dev-only-change-me-omniflow-encryption-key}
+      OMNIFLOW_DEMO_DATA: ${OMNIFLOW_DEMO_DATA:-true}
+      OMNIFLOW_DEMO_EMAIL: ${OMNIFLOW_DEMO_EMAIL:-owner@omniflow.local}
+      OMNIFLOW_DEMO_PASSWORD: ${OMNIFLOW_DEMO_PASSWORD:-OmniFlow123!}
+      OMNIFLOW_DEMO_ORG: ${OMNIFLOW_DEMO_ORG:-Acme Retail}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_FROM: ${SMTP_FROM:-noreply@omniflow.local}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-omniflow-dev-verify-token}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_API_VERSION: ${WHATSAPP_API_VERSION:-v21.0}
+      FRONTEND_URL: ${FRONTEND_URL:-http://localhost:3000}
+      IMPORT_STAGING_DIR: /app/data/imports
+      IMPORT_MAX_CHUNK_MB: ${IMPORT_MAX_CHUNK_MB:-64}
+      IMPORT_MAX_FILE_BYTES: ${IMPORT_MAX_FILE_BYTES:-0}
+    volumes:
+      - importdata:/app/data/imports
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  backend-worker:
+    image: omniflow-backend:local
+    container_name: omniflow-worker
+    restart: unless-stopped
+    command: ["/app/worker.jar"]
+    environment:
+      SPRING_PROFILES_ACTIVE: docker,worker
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-omniflow}
+      DATABASE_USERNAME: ${POSTGRES_USER:-omniflow}
+      DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-omniflow_dev_password}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      RABBITMQ_HOST: rabbitmq
+      RABBITMQ_PORT: 5672
+      RABBITMQ_USERNAME: ${RABBITMQ_USERNAME:-omniflow}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-omniflow_dev_password}
+      OMNIFLOW_JWT_SECRET: ${OMNIFLOW_JWT_SECRET:-dev-only-change-me-omniflow-jwt-secret-at-least-32-bytes}
+      OMNIFLOW_ENCRYPTION_KEY: ${OMNIFLOW_ENCRYPTION_KEY:-dev-only-change-me-omniflow-encryption-key}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_STARTTLS: ${SMTP_STARTTLS:-false}
+      SMTP_FROM: ${SMTP_FROM:-noreply@omniflow.local}
+      WHATSAPP_VERIFY_TOKEN: ${WHATSAPP_VERIFY_TOKEN:-omniflow-dev-verify-token}
+      WHATSAPP_APP_SECRET: ${WHATSAPP_APP_SECRET:-}
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_API_VERSION: ${WHATSAPP_API_VERSION:-v21.0}
+      OMNIFLOW_RATE_EMAIL_PER_MIN: ${OMNIFLOW_RATE_EMAIL_PER_MIN:-600}
+      OMNIFLOW_RATE_WHATSAPP_PER_MIN: ${OMNIFLOW_RATE_WHATSAPP_PER_MIN:-300}
+      OMNIFLOW_RATE_SMS_PER_MIN: ${OMNIFLOW_RATE_SMS_PER_MIN:-300}
+      IMPORT_STAGING_DIR: /app/data/imports
+      IMPORT_MAX_CHUNK_MB: ${IMPORT_MAX_CHUNK_MB:-64}
+      IMPORT_MAX_FILE_BYTES: ${IMPORT_MAX_FILE_BYTES:-0}
+      IMPORT_LOCK_SECONDS: ${IMPORT_LOCK_SECONDS:-3600}
+      IMPORT_MAX_ATTEMPTS: ${IMPORT_MAX_ATTEMPTS:-5}
+    volumes:
+      - importdata:/app/data/imports
+    ports:
+      - "8081:8081"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8081/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      backend-api:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: ../infrastructure/docker/frontend.Dockerfile
+      args:
+        NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-comGpt}
+    image: omniflow-frontend:local
+    container_name: omniflow-frontend
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend-api:8080
+      NEXT_PUBLIC_APP_NAME: ${NEXT_PUBLIC_APP_NAME:-comGpt}
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend-api:
+        condition: service_started
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: omniflow-otel
+    profiles: ["observability"]
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./infrastructure/monitoring/otel-collector.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: omniflow-prometheus
+    profiles: ["observability"]
+    volumes:
+      - ./infrastructure/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    container_name: omniflow-grafana
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./infrastructure/monitoring/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  pgdata:
+  rabbitdata:
+  grafanadata:
+  importdata:

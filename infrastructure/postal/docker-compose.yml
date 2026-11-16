@@ -1,0 +1,145 @@
+# ============================================================================
+# Postal — self-hosted open-source SMTP relay (deploy as a SEPARATE Coolify
+# resource from comGpt). This is the shared email relay every comGpt workspace
+# sends through; each workspace sets only its own fromAddress + fromName.
+# ----------------------------------------------------------------------------
+# Coolify setup:
+#   1. New Resource -> Docker Compose -> point at this file
+#      (or paste its contents into the Coolify compose editor).
+#   2. Set the environment variables below in Coolify's Environment Variables UI.
+#   3. On the Coolify SERVER, create /opt/postal/config containing:
+#        - postal.yml   (copy postal.example.yml from this folder, fill it in)
+#        - signing.key  (generate: openssl genrsa -out /opt/postal/config/signing.key 2048)
+#      The postal-* services bind-mount that directory read-only at /config.
+#   4. Assign a domain:  postal-web -> https://postal.yourdomain.com:5000
+#      (Coolify's Traefik terminates TLS; do NOT publish the web port.)
+#   5. postal-smtp publishes 25:25 (raw SMTP, bypasses the proxy). Ensure your
+#      VPS/firewall allows inbound AND outbound TCP 25, and set PTR/rDNS.
+#   6. Deploy, then in the postal-web terminal run once:
+#        postal initialize     # create the DB schema
+#        postal make-user      # create your admin login
+#   7. In the Postal UI: create an Organization + Mail Server, add each client's
+#      sending domain, verify the DNS records Postal shows, and generate an SMTP
+#      credential. That username/password is comGpt's shared SMTP_USERNAME/PASSWORD.
+#
+# Secrets: NEVER commit a filled postal.yml or a real signing.key. Only this
+# compose (env references) and postal.example.yml (placeholders) belong in Git.
+# Pin POSTAL_VERSION to a stable tag in production (not "latest"):
+#   https://github.com/postalserver/postal/pkgs/container/postal
+# ============================================================================
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  mariadb:
+    image: mariadb:10.11
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: postal
+      MARIADB_USER: postal
+      MARIADB_PASSWORD: ${POSTAL_DB_PASSWORD:?set POSTAL_DB_PASSWORD in Coolify}
+      MARIADB_ROOT_PASSWORD: ${POSTAL_DB_ROOT_PASSWORD:?set POSTAL_DB_ROOT_PASSWORD in Coolify}
+    volumes:
+      - postal_db:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging: *default-logging
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: postal
+      RABBITMQ_DEFAULT_PASS: ${POSTAL_RABBITMQ_PASSWORD:?set POSTAL_RABBITMQ_PASSWORD in Coolify}
+      RABBITMQ_DEFAULT_VHOST: postal
+    volumes:
+      - postal_rabbit:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    logging: *default-logging
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - postal_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    logging: *default-logging
+
+  postal-web:
+    image: ghcr.io/postalserver/postal:${POSTAL_VERSION:-latest}
+    restart: unless-stopped
+    command: ["postal", "web-server"]
+    volumes:
+      - /opt/postal/config:/config:ro
+    environment:
+      WAIT_FOR_TARGETS: "mariadb:3306 rabbitmq:5672 redis:6379"
+      WAIT_FOR_TIMEOUT: "90"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # No published port: assign a Coolify domain to internal port 5000.
+    logging: *default-logging
+
+  postal-smtp:
+    image: ghcr.io/postalserver/postal:${POSTAL_VERSION:-latest}
+    restart: unless-stopped
+    command: ["postal", "smtp-server"]
+    cap_add:
+      - NET_BIND_SERVICE
+    ports:
+      - "25:25"
+    volumes:
+      - /opt/postal/config:/config:ro
+    environment:
+      WAIT_FOR_TARGETS: "mariadb:3306 rabbitmq:5672 redis:6379"
+      WAIT_FOR_TIMEOUT: "90"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    logging: *default-logging
+
+  postal-worker:
+    image: ghcr.io/postalserver/postal:${POSTAL_VERSION:-latest}
+    restart: unless-stopped
+    command: ["postal", "worker"]
+    volumes:
+      - /opt/postal/config:/config:ro
+    environment:
+      WAIT_FOR_TARGETS: "mariadb:3306 rabbitmq:5672 redis:6379"
+      WAIT_FOR_TIMEOUT: "90"
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    logging: *default-logging
+
+volumes:
+  postal_db:
+  postal_rabbit:
+  postal_redis:

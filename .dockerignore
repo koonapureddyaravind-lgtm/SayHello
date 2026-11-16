@@ -1,0 +1,13 @@
+# Keep build contexts small; the images build from source.
+.git
+.gitignore
+frontend/node_modules
+frontend/.next
+frontend/out
+backend/**/target
+**/*.log
+.env
+.env.*
+docs
+infrastructure/data
+infrastructure/monitoring/grafana-data
